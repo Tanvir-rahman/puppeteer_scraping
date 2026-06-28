@@ -58,11 +58,11 @@ function sanitize(cookie) {
 // Returns true when the page is logged in and ready to scrape. Throws AuthError
 // (with an exit code) when it can't get there.
 export async function ensureLoggedIn(browser, page, opts) {
-  const { username, pass, headful, out, fresh } = opts;
+  const { username, pass, headful, out, fresh, manual } = opts;
 
   // ---- fast path: restore cookies BEFORE navigating, else the first request
   //      goes out unauthenticated and we always land on the login wall.
-  //      --fresh skips this entirely to force a new password login. ----
+  //      --fresh skips this entirely to force a new login. ----
   const cookies = fresh ? null : loadCookies(out);
   if (fresh) log('--fresh: ignoring saved cookies, logging in again');
   if (cookies) {
@@ -72,10 +72,33 @@ export async function ensureLoggedIn(browser, page, opts) {
       log('logged in from cookie cache');
       return true;
     }
-    log('cookies stale — falling back to password login');
+    log('cookies stale — need to log in again');
   }
 
-  // ---- password login: needs creds and a visible window for 2FA ----
+  // ---- manual login: open the page, the HUMAN does everything (email,
+  //      password, CAPTCHA, 2FA). No automated typing, so nothing looks like a
+  //      bot — the most reliable way past FB's login defenses. One time; cookies
+  //      are saved and later runs go headless. ----
+  if (manual) {
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+    process.stderr.write(
+      '\n>> Manual login. In the browser window:\n' +
+      '   type your email + password, solve any CAPTCHA / 2FA, and continue\n' +
+      '   until your chat list is fully visible. THEN press Enter here.\n\n'
+    );
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    await rl.question('Press Enter once you see your chats... ');
+    rl.close();
+    if (await isLoggedIn(page)) {
+      await saveCookies(browser, out);
+      log('manual login OK, cookies saved');
+      return true;
+    }
+    throw new AuthError('manual login not completed (chat list not detected)', 2);
+  }
+
+  // ---- automated password login: needs creds and a visible window for 2FA.
+  //      Tends to trip CAPTCHA (instant fill looks robotic) — prefer --manual. ----
   if (!username || !pass) {
     throw new AuthError('no valid cookies and missing --username/--pass', 1);
   }

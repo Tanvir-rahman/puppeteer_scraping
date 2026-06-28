@@ -40,7 +40,17 @@ pptscript --username <user> --pass <pass> [--headful] [--out cookies.json]
 --pass       FB password                    (or $FB_PASS env)
 --headful    show the browser window        (forced automatically on first run)
 --fresh      ignore saved cookies + log in again (forces a window for 2FA)
+--manual     YOU log in by hand in the window (best vs CAPTCHA) — no auto-typing
 --out        cookie cache path (default ./cookies.json, CWD-relative)
+```
+
+**Hitting CAPTCHA?** Auto-filling credentials looks robotic and trips FB's
+defenses. Log in by hand instead — open the window, type everything yourself,
+solve the CAPTCHA/2FA, press Enter. Cookies are saved; later runs go headless.
+
+```bash
+node src/cli.js --manual --fresh    # window opens at login; you do it all
+node src/cli.js                     # afterwards: headless, no login
 ```
 
 Re-login from scratch (stale cookies / switch account):

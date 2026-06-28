@@ -35,7 +35,8 @@ function parse() {
       username: { type: 'string' },
       pass: { type: 'string' },
       headful: { type: 'boolean', default: false },
-      fresh: { type: 'boolean', default: false }, // ignore saved cookies, log in again
+      fresh: { type: 'boolean', default: false },  // ignore saved cookies, log in again
+      manual: { type: 'boolean', default: false }, // you type creds/CAPTCHA/2FA by hand
       out: { type: 'string', default: 'cookies.json' },
     },
   });
@@ -60,7 +61,7 @@ async function main() {
   // First login needs a visible window (2FA); a valid cookie cache lets us go
   // headless. So: headful if explicitly asked, on a forced --fresh re-login, OR
   // when no cache exists yet.
-  const headful = opts.headful || opts.fresh || !fs.existsSync(opts.out);
+  const headful = opts.headful || opts.fresh || opts.manual || !fs.existsSync(opts.out);
 
   const browser = await puppeteer.launch({
     headless: !headful,
