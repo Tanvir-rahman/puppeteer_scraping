@@ -1,0 +1,5 @@
+# pnpm v10+ blocks dependency build scripts by default. Puppeteer downloads
+# Chromium via a postinstall script, so it must be allowed here (pnpm 11 reads
+# this from pnpm-workspace.yaml, NOT the "pnpm" field in package.json).
+allowBuilds:
+  puppeteer: true
