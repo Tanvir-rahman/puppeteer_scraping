@@ -38,11 +38,35 @@ pptscript --username <user> --pass <pass> [--headful] [--out cookies.json]
 
 --username   FB email / phone / username   (or $FB_USER env)
 --pass       FB password                    (or $FB_PASS env)
+--totp       2FA/authenticator secret       (or $FB_TOTP env) — auto-enters login codes
 --headful    show the browser window        (forced automatically on first run)
 --fresh      ignore saved cookies + log in again (forces a window for 2FA)
 --manual     YOU log in by hand in the window (best vs CAPTCHA) — no auto-typing
+--profile    persistent browser profile dir (or $FB_PROFILE) — see below
 --out        cookie cache path (default ./cookies.json, CWD-relative)
 ```
+
+### Stop getting reCAPTCHA (persistent profile — recommended)
+
+Facebook challenges fresh/automated browsers with reCAPTCHA. A **persistent
+profile dir** keeps the whole browser session + device trust, so once you log in
+(solving the captcha that one time), Facebook stops challenging it.
+
+```bash
+# 1. one-time: log in by hand into the profile (window opens; solve captcha + 2FA)
+node src/cli.js --profile ./fb-profile --manual --fresh
+
+# 2. every run after: reuses the profile — no login, no captcha
+node src/cli.js --profile ./fb-profile
+```
+
+Set it once in `.env` so you don't pass the flag each time:
+
+```
+FB_PROFILE="./fb-profile"
+```
+
+The profile dir is gitignored (it holds a live session — treat like a password).
 
 **Hitting CAPTCHA?** Auto-filling credentials looks robotic and trips FB's
 defenses. Log in by hand instead — open the window, type everything yourself,
@@ -68,6 +92,20 @@ export FB_USER='you@example.com'
 read -rs FB_PASS; export FB_PASS   # type password, no echo
 pptscript                           # no creds on the command line
 ```
+
+### Auto 2FA (TOTP)
+
+If your account has 2-factor auth, put the **authenticator secret** in `.env` and
+login codes are generated and entered automatically — no phone, no manual code:
+
+```
+FB_TOTP="JBSW Y3DP EHPK 3PXP"     # the base32 secret shown when you add FB to an authenticator app
+```
+
+(Spaces/dashes are stripped.) It's the same secret behind your Google
+Authenticator / Authy entry — from FB **Settings → Password and security →
+Two-factor authentication → Authenticator app** (reveal/"set up key"). With it set,
+the login flow also clicks through "Trust this device" / "Continue" checkpoints.
 
 stdout is **thread names only** — logs and prompts go to stderr, so it pipes:
 

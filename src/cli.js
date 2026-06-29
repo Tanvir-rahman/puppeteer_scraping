@@ -34,6 +34,8 @@ function parse() {
     options: {
       username: { type: 'string' },
       pass: { type: 'string' },
+      totp: { type: 'string' }, // TOTP/2FA secret (or $FB_TOTP) for auto 2FA
+      profile: { type: 'string' }, // persistent browser profile dir (or $FB_PROFILE)
       headful: { type: 'boolean', default: false },
       fresh: { type: 'boolean', default: false },  // ignore saved cookies, log in again
       manual: { type: 'boolean', default: false }, // you type creds/CAPTCHA/2FA by hand
@@ -46,6 +48,7 @@ function parse() {
     ...values,
     username: values.username ?? process.env.FB_USER,
     pass: values.pass ?? process.env.FB_PASS,
+    totp: values.totp ?? process.env.FB_TOTP,
   };
 }
 
@@ -63,8 +66,13 @@ async function main() {
   // when no cache exists yet.
   const headful = opts.headful || opts.fresh || opts.manual || !fs.existsSync(opts.out);
 
+  // A persistent profile dir keeps the whole browser session + device trust, so
+  // once you log in (solving any reCAPTCHA once), Facebook stops challenging it.
+  const profile = opts.profile ?? process.env.FB_PROFILE;
+
   const browser = await puppeteer.launch({
     headless: !headful,
+    userDataDir: profile || undefined,
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
   });
 

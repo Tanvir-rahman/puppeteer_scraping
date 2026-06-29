@@ -4,7 +4,7 @@
 // conversation row in DevTools, and update the selectors below.
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const MESSENGER_URL = 'https://www.messenger.com/';
+const MESSENGER_URL = 'https://www.facebook.com/messages/t/';
 const ROW_SELECTOR = '[role="grid"] [role="row"]';
 const SCROLL_SETTLE_MS = 900;   // let lazy-loaded rows hydrate after each scroll
 const MAX_SCROLL_ITERS = 120;   // hard ceiling so a never-settling list can't spin forever
@@ -22,8 +22,14 @@ export function pickName({ title, ariaLabel }) {
 // Returns an array of unique thread names. Caller decides what an empty result
 // means (see cli.js: empty => exit 3).
 export async function collectThreadNames(page) {
-  await page.goto(MESSENGER_URL, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector(ROW_SELECTOR, { timeout: 20000 });
+  // ensureLoggedIn already navigated us into Messenger (often into a /t/<thread>
+  // view — the chat list lives in the left pane on EVERY page). Re-navigating
+  // here detaches the frame mid-scrape ("Attempted to use detached Frame"), so
+  // only goto if we're somehow not on messenger.
+  if (!page.url().includes('/messages')) {
+    await page.goto(MESSENGER_URL, { waitUntil: 'domcontentloaded' });
+  }
+  await page.waitForSelector(ROW_SELECTOR, { timeout: 30000 });
   await sleep(2500); // let the first batch hydrate
 
   // NOTE: we scroll via JS scrollTop, NOT mouse wheel. Messenger throws an
@@ -34,14 +40,27 @@ export async function collectThreadNames(page) {
   const seen = new Set();
   let stable = 0;
   for (let i = 0; i < MAX_SCROLL_ITERS && stable < STABLE_ROUNDS; i++) {
-    const rows = await page.evaluate(extractRowsInPage);
+    let rows;
+    try {
+      rows = await page.evaluate(extractRowsInPage);
+    } catch {
+      // FB sometimes re-navigates (session refresh) and detaches the frame.
+      // Wait for the list to return and retry instead of crashing the run.
+      await page.waitForSelector(ROW_SELECTOR, { timeout: 15000 }).catch(() => {});
+      await sleep(1000);
+      continue;
+    }
     const before = seen.size;
     for (const raw of rows) {
       const name = pickName(raw);
       if (name) seen.add(name);
     }
     stable = seen.size === before ? stable + 1 : 0;
-    await page.evaluate(scrollChatListInPage);
+    try {
+      await page.evaluate(scrollChatListInPage);
+    } catch {
+      /* transient detach — next iteration's waitForSelector recovers */
+    }
     await sleep(SCROLL_SETTLE_MS);
   }
   return [...seen];
