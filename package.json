@@ -1,13 +1,14 @@
 {
-  "name": "puppeteer_scraping",
+  "name": "fb-multi-account-scraper",
   "version": "1.0.0",
-  "description": "CLI that logs into Facebook and prints Messenger thread names",
+  "description": "FB Multi-Account Scraper & Manager — stealth Puppeteer CLI to scrape and manage many Facebook Messenger accounts at once",
   "type": "module",
   "bin": {
-    "pptscript": "./src/cli.js"
+    "fb-scraper": "./src/cli.js"
   },
   "scripts": {
-    "test": "node test_parse.mjs"
+    "test": "node test_parse.mjs && node test_farm.mjs",
+    "farm": "node src/farm.js"
   },
   "license": "ISC",
   "dependencies": {

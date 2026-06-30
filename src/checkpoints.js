@@ -22,6 +22,12 @@ const CODE_INPUTS = [
 // Buttons that advance a checkpoint. Order-independent; matched case-insensitively
 // against trimmed text. "not now"/"don't save" dismiss optional upsells.
 const CONTINUE_TEXT = "^(continue|submit|trust this device|this was me|yes,? continue|save|ok|continue as .*|not now|don.?t save)$";
+// FB now front-loads a passkey/biometric prompt ("Use face scan, fingerprint…")
+// BEFORE the authenticator field. Its "Continue" tries to use a passkey we don't
+// have (headless). With a TOTP secret we route around it: click "Try another way",
+// then pick the authenticator-app option, which finally reveals the code input.
+const TRY_ANOTHER_WAY = "^try another way$";
+const AUTH_APP_OPTION = "(authentication app|code generator|authenticator app|security code is generated|use your authenticator)";
 
 const log = (m) => process.stderr.write(`[login] ${m}\n`);
 const loggedIn = (page, ms = 6000) =>
@@ -70,21 +76,31 @@ async function fillTotp(page, secret) {
 const fbHome = (page) =>
   page.$('[role="banner"], [aria-label="Your profile"], a[href="/messages/"]').then((h) => !!h);
 
-async function clickContinue(page) {
-  const handle = await page.evaluateHandle((reSrc) => {
-    const re = new RegExp(reSrc, 'i');
-    const els = [...document.querySelectorAll('div[role="button"], button, input[type="submit"]')];
+// Click the first visible button/link whose trimmed text matches reSrc (case-i).
+async function clickButton(page, reSrc) {
+  const handle = await page.evaluateHandle((src) => {
+    const re = new RegExp(src, 'i');
+    const els = [...document.querySelectorAll('div[role="button"], button, input[type="submit"], a[role="button"], [role="link"]')];
     return els.find((e) => {
       const t = (e.textContent || e.value || '').trim();
       return re.test(t) && e.offsetParent !== null;
     }) || null;
-  }, CONTINUE_TEXT);
+  }, reSrc);
   const el = handle.asElement();
   if (!el) return false;
   const label = await el.evaluate((e) => (e.textContent || e.value || '').trim());
   await el.click();
   log(`clicked "${label}"`);
   return true;
+}
+
+const clickContinue = (page) => clickButton(page, CONTINUE_TEXT);
+
+async function hasCodeInput(page) {
+  for (const sel of CODE_INPUTS) {
+    if (await page.$(sel)) return true;
+  }
+  return false;
 }
 
 // Which actionable step (if any) is currently on screen.
@@ -113,6 +129,7 @@ export async function automatedLogin(page, { username, pass, totpSecret }, maxRo
   // Pass Facebook's post-login checkpoints. A 'none' step is usually just the
   // Meta loading splash between pages — wait it out, don't bail. Exit when the
   // Facebook home chrome appears, a reCAPTCHA blocks us, or rounds run out.
+  let twoFaNavs = 0; // cap "Try another way" clicks so a chooser loop can't spin
   for (let round = 0; round < maxRounds; round++) {
     try {
       if (await fbHome(page)) {
@@ -123,6 +140,80 @@ export async function automatedLogin(page, { username, pass, totpSecret }, maxRo
       if (await page.$('iframe[src*="recaptcha"], iframe[title*="recaptcha" i], div.g-recaptcha')) {
         log('reCAPTCHA detected — automation cannot pass this; finish in the window');
         return false;
+      }
+      // 2FA routing: FB shows a passkey prompt first whose "Continue" we must NOT
+      // click (it invokes a passkey we don't have). With a TOTP secret and no code
+      // field yet, steer to the code: prefer the authenticator-app option if it's
+      // on screen; otherwise click "Try another way" to reveal the method list.
+      // Order matters — the method list ALSO has a "Try another way" (would loop).
+      if (totpSecret && !(await hasCodeInput(page))) {
+        await shot(page, `r${round}-2fa`);
+        // The chooser is a list of custom-rendered rows (no real <input>/role=radio).
+        // Return an element handle for the VISIBLY-SIZED row (filter out hidden zero-
+        // rect duplicates) that holds both the title and its description, then use
+        // Puppeteer's elementHandle.click() — it scrolls in and clicks the real
+        // center. Then Continue. Capped so a non-advancing chooser can't spin forever.
+        const handle = await page.evaluateHandle(() => {
+          const titleRe = /authentication app/i;
+          const descRe = /get a code from your authentication/i;
+          const sized = [...document.querySelectorAll('div, label, li')]
+            .filter((e) => titleRe.test(e.textContent || '') && descRe.test(e.textContent || ''))
+            .filter((e) => {
+              const r = e.getBoundingClientRect();
+              return r.width > 120 && r.height > 28 && r.height < 130;
+            })
+            .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+          return sized[0] || null;
+        });
+        const row = handle.asElement();
+        // If we've already tried the auth-app route twice and we're STILL on the
+        // chooser, FB is refusing to advance under automation. Stop clicking — every
+        // extra Continue can fire a passkey/WebAuthn OS prompt that freezes the tab
+        // and fights the human. Break so the caller hands an INTERACTIVE page over.
+        if (row && twoFaNavs >= 1) {
+          log('2FA chooser will not advance under automation — stopping auto-clicks so you can finish by hand');
+          break;
+        }
+        if (row && twoFaNavs < 1) {
+          twoFaNavs++;
+          await row.click();
+          await sleep(700);
+          // Submit via the REAL bottom button: the WIDEST visible element whose text
+          // is exactly "Continue" (the full-width blue bar), not the first text match
+          // (which can be a wrapper/stale button and miss the real click target).
+          const contHandle = await page.evaluateHandle(() => {
+            const cands = [...document.querySelectorAll('div[role="button"], button')]
+              .filter((e) => /^continue$/i.test((e.textContent || '').trim()) && e.offsetParent !== null);
+            cands.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+            return cands[0] || null;
+          });
+          const cont = contHandle.asElement();
+          if (cont) {
+            const w = await cont.evaluate((e) => Math.round(e.getBoundingClientRect().width));
+            // FB rejects a scripted mouse-click on this 2FA submit (a human's works).
+            // Try keyboard activation too: focus the tab, focus the button, press
+            // Enter, then also click — whichever FB honors advances to the code field.
+            await page.bringToFront().catch(() => {});
+            await cont.focus().catch(() => {});
+            await page.keyboard.press('Enter').catch(() => {});
+            await sleep(500);
+            await cont.click().catch(() => {});
+            log(`selected "Authentication app" → submitted Continue (w=${w})`);
+          } else {
+            log('selected "Authentication app" but no Continue button found');
+          }
+          await sleep(2800);
+          await shot(page, `r${round}-postcont`);
+          log(`post-continue url=${page.url()} hasCode=${await hasCodeInput(page)}`);
+          continue;
+        }
+        // Passkey prompt (no list yet) — reveal the list with "Try another way".
+        if (twoFaNavs < 2 && (await clickButton(page, TRY_ANOTHER_WAY))) {
+          twoFaNavs++;
+          log('passkey prompt — clicked "Try another way"');
+          await sleep(2500);
+          continue;
+        }
       }
       const step = await currentStep(page);
       log(`round ${round}: step=${step} url=${page.url()}`);

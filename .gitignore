@@ -1,4 +1,13 @@
 node_modules
 cookies.json
+cookies-*.json
 .env
+.env.*
+!.env.example
 fb-profile/
+fb-profile-*/
+accounts.json
+profiles/
+cookies/
+farm-results/
+quarantine.json

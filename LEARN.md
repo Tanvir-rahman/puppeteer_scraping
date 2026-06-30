@@ -5,7 +5,7 @@ functions, `async/await`) but **nothing** about browser automation or scraping.
 By the end you'll understand every line of this project and be able to write your
 own scraper.
 
-We learn by reading **this exact codebase** (`pptscript` — a CLI that logs into
+We learn by reading **this exact codebase** (`fb-scraper` — a CLI that logs into
 Facebook and prints your Messenger conversation names). Every concept is tied to a
 real file and line you can open right now.
 
@@ -24,6 +24,7 @@ real file and line you can open right now.
 9. [Code tour: `checkpoints.js` (login automation & 2FA)](#9-code-tour-checkpointsjs-login-automation--2fa)
 10. [Code tour: `threads.js` (the actual scrape)](#10-code-tour-threadsjs-the-actual-scrape)
 11. [Anti-bot: stealth, headless, persistent profiles](#11-anti-bot-stealth-headless-persistent-profiles)
+11½. [Bonus: the account farm (`farm.js`)](#11-bonus-the-account-farm-farmjs)
 12. [Debugging a broken scraper](#12-debugging-a-broken-scraper)
 13. [Exercises (do these to actually learn)](#13-exercises-do-these-to-actually-learn)
 14. [Glossary](#14-glossary)
@@ -80,12 +81,23 @@ Puppeteer ──launch()──▶ Browser ──newPage()──▶ Page ──$(
 See all four in `src/cli.js`:
 
 ```js
-const browser = await puppeteer.launch({ headless: !headful, /* ... */ }); // Browser
+const browser = await puppeteer.launch({
+  headless: !headful,
+  defaultViewport: headful ? null : { width: 1280, height: 1696 }, // Browser
+  args: ['--window-size=1280,1696', /* ... */],
+});
 const page = await browser.newPage();                                       // Page
-await page.setViewport({ width: 1280, height: 900 });
 // ...
 await browser.close();
 ```
+
+> **Why the tall window?** An older version pinned `page.setViewport({width:1280,
+> height:900})`. That bit us: Facebook's 2FA "Choose a way to confirm" modal is taller
+> than 900px, its Continue button sat **below the fold**, and FB locks page scroll — so
+> the button was unreachable for *both* the script and a human taking over. The fix is a
+> tall window (`--window-size` + a tall `defaultViewport`), and in headful mode
+> `defaultViewport: null` lets the page fill the real window and scroll naturally. See
+> section 9 — it's a great cautionary tale about emulated viewports clipping content.
 
 The single most important mental split: **your Node code and the page's JavaScript
 are two different worlds.** They run in different processes and can't see each
@@ -100,7 +112,7 @@ This project uses `pnpm` (a faster npm) and ES modules (`"type": "module"` in
 `package.json`, so files use `import`, not `require`).
 
 ```bash
-cd /Users/pathaoltd/personal/puppeteer_scraping
+cd fb-multi-account-scraper
 pnpm install            # installs puppeteer + plugins AND downloads a matched Chromium
 ```
 
@@ -306,29 +318,43 @@ login, OR doing a manual login, OR there's no saved cookie file yet.* The logic
 encodes the project's core idea: **the first login needs a human (so, a window);
 every run after reuses cookies and can be invisible.**
 
-**d) Launch and orchestrate (lines 73–93):**
+**d) Launch and orchestrate:**
 
 ```js
 const browser = await puppeteer.launch({
   headless: !headful,
   userDataDir: profile || undefined,
-  args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+  // headful: null = page fills the real window (natural scroll). headless: force a
+  // tall viewport so off-fold buttons (the 2FA Continue) still render in-view.
+  defaultViewport: headful ? null : { width: 1280, height: 1696 },
+  args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1280,1696'],
 });
 // ...
 await ensureLoggedIn(browser, page, { ...opts, headful });   // auth.js
 const names = await collectThreadNames(page);                // threads.js
-for (const name of names) process.stdout.write(name + '\n');
+for (const name of names) process.stdout.write(name + '\n'); // stdout = names only
+if (opts.json) fs.writeFileSync(opts.json, JSON.stringify({ names, /* + meta */ }, null, 2));
 await browser.close();
 ```
 
 That's the whole program: launch → log in → scrape → print → close. Everything else
-is the *how* of those two middle steps.
+is the *how* of those two middle steps. Three things the entry point grew over time:
+
+- **`--proxy`** — a per-account proxy URL (`http://user:pass@host:port`). Proxy creds
+  can't ride in `--proxy-server`, so the host goes on the launch arg and the
+  username/password are applied per-page with `page.authenticate()`.
+- **`--json <path>`** — also persists the scraped names + count + timestamp to a JSON
+  file (stdout stays names-only, so pipes keep working).
+- **Farm mode (`PPT_FARM=1`)** — when the multi-account orchestrator spawns this CLI as
+  a subprocess, it passes per-account creds via the child env and sets `PPT_FARM=1` so
+  the CLI treats them as authoritative and **skips `.env`** entirely (so a stray root
+  `.env` can't shadow account B with account A's password). See section 11½ (the farm).
 
 **e) Error handling & exit codes (lines 94–99).** Note the discipline here, worth
 copying into your own tools:
 
 - **stdout = data only** (the thread names). **stderr = logs, prompts, errors.** That's
-  why the file header says `pptscript ... 2>/dev/null | grep Mom` works — you can pipe
+  why the file header says `fb-scraper ... 2>/dev/null | grep Mom` works — you can pipe
   the clean data and throw away the chatter. Look: every status message uses
   `process.stderr.write`, only names use `process.stdout.write`.
 - **Exit codes carry meaning:** `0` ok · `1` bad args · `2` login failed · `3` scrape
@@ -346,7 +372,7 @@ and staying logged in.** This file is the strategy. The strategy in one sentence
 ### What is a cookie session?
 
 When you log into Facebook, the server hands your browser **cookies** — little tokens
-that say "this browser is authenticated as Tanvir." Every later request includes
+that say "this browser is authenticated as you." Every later request includes
 them, so you stay logged in. If we *save those cookies to a file* and *load them into
 a fresh browser*, that browser is logged in too — no password, no 2FA. That's the
 entire game.
@@ -465,6 +491,8 @@ now*, act on it, repeat.
 for (let round = 0; round < maxRounds; round++) {
   if (await fbHome(page)) break;          // success: top bar appeared, we're in
   if (/* reCAPTCHA present */) return false;  // can't auto-solve → hand to human
+  // 2FA routing: FB front-loads a passkey chooser before the code field (see below).
+  if (totpSecret && !(await hasCodeInput(page))) { /* route to Authentication app */ }
   const step = await currentStep(page);   // which screen are we on?
   if (step === 'login')      await fillLogin(page, username, pass);
   else if (step === 'code')  { await fillTotp(page, totpSecret); await clickContinue(page); }
@@ -474,19 +502,65 @@ for (let round = 0; round < maxRounds; round++) {
 }
 ```
 
-`currentStep` (line 91) just probes the DOM: is there a code input? → `'code'`. A
-password field? → `'login'`. A continue-ish button? → `'continue'`. Nothing
-actionable? → `'none'` (probably a loading splash, so wait, don't bail).
+`currentStep` just probes the DOM: is there a code input? → `'code'`. A password field?
+→ `'login'`. A continue-ish button? → `'continue'`. Nothing actionable? → `'none'`
+(probably a loading splash, so wait, don't bail).
 
 **This loop pattern is gold for any messy multi-step web flow.** Don't script "do A,
 then B, then C." Instead: "look at the page, handle whatever's there, loop." It
 survives screens appearing in different orders or being skipped.
 
-`clickContinue` (line 73) finds a button whose visible text matches a regex of known
-button labels (`CONTINUE_TEXT`, line 24 — `continue|submit|trust this device|...`),
-**and is actually visible** (`e.offsetParent !== null` filters out hidden elements).
-Matching by visible text, not by a brittle selector, is what makes it robust to
-Facebook's class-name churn.
+`clickButton(page, reSrc)` finds a button whose visible text matches a regex of known
+labels (`CONTINUE_TEXT` — `continue|submit|trust this device|...`), **and is actually
+visible** (`e.offsetParent !== null` filters out hidden elements); `clickContinue` is
+just `clickButton(page, CONTINUE_TEXT)`. Matching by visible text, not a brittle
+selector, is what makes it robust to Facebook's class-name churn.
+
+### The passkey wall — why first login is only *semi*-automatic
+
+This is the most important real-world lesson in the project, and it's recent.
+Facebook now interposes a **passkey-first 2FA chooser** before the authenticator code
+field: a screen titled *"Choose a way to confirm it's you"* with radio options —
+Passkey (default), Notification, WhatsApp, **Authentication app**, Backup code — and a
+Continue button. A naive loop clicks "Continue" on the default (Passkey), which fires a
+WebAuthn/Touch-ID prompt the script can't satisfy, and stalls.
+
+The routing the code does to reach the TOTP field:
+
+1. **Detect the wall** — `totpSecret && !hasCodeInput(page)`: we have a TOTP secret but
+   no code field is on screen yet, so we must be on the passkey/chooser path.
+2. **`Try another way`** — `clickButton(page, TRY_ANOTHER_WAY)` expands the passkey
+   prompt into the full method list.
+3. **Select "Authentication app"** — these rows are *custom-rendered* (no real
+   `<input type="radio">` / `role="radio"`), so a DOM `.click()` on the text span does
+   nothing. The code finds the visibly-sized row holding both the title *and* its
+   description, gets an `ElementHandle`, and uses Puppeteer's `elementHandle.click()`
+   (which scrolls in and clicks the real center). The radio then turns blue.
+4. **Click the real bottom Continue** — the **widest** visible element whose text is
+   exactly "Continue" (the full-width blue bar), not the first text match anywhere.
+
+And here's the hard truth the code now encodes: **even with the right method selected
+and the right button clicked, Facebook refuses to advance on a *scripted* click — while
+a human's click on the very same button works.** Tried and ruled out: real-button
+click, `page.bringToFront()` (focus), keyboard `Enter` activation, the viewport fix.
+It's anti-bot enforcement on that specific submit. So instead of spinning, the loop
+makes **one** auto attempt and then `break`s — handing the human an *interactive* page
+(now scrollable, thanks to the tall-window fix) to click Continue + type the code once.
+A guard counter (`twoFaNavs`) caps the attempts so a non-advancing chooser can't loop
+forever.
+
+**The takeaways, which generalize far past Facebook:**
+
+- **Custom widgets need real input events.** When a `.click()` "does nothing," the
+  element is probably a styled `<div>`, not a native control — use
+  `elementHandle.click()` (a true mouse event at the element's center), or click the
+  underlying input.
+- **Click the *specific* target, not the first text match.** "Widest element whose text
+  is exactly `Continue`" beats "first thing containing 'continue'," which can be a
+  wrapper or a stale/offscreen duplicate, so your click lands on the wrong pixel.
+- **Some gates simply won't yield to automation.** When a human action works and an
+  identical scripted one doesn't, stop fighting and design a clean human hand-off. The
+  realistic ceiling here is *semi-auto first login, then fully-automated cookie reuse*.
 
 ### The `shot` debug helper (line 32)
 
@@ -606,6 +680,37 @@ session is invisible. The most robust scraper is the one that logs in least.
 
 ---
 
+## 11½. Bonus: the account farm (`farm.js`)
+
+Once one account works, running *many* is its own discipline. `src/farm.js` is an
+orchestrator that runs the single-account CLI across every account in `accounts.json`.
+You don't need it to learn scraping, but it shows production patterns worth stealing:
+
+- **Process isolation over threads.** Each account runs as its **own subprocess**
+  (`child_process.spawn` of `cli.js`) with its own profile dir, cookie file, and proxy.
+  One hung/crashed Chrome can't take down the batch, and the OS reclaims its memory on
+  exit. Creds go via the child **env** (not argv) so they don't leak into `ps` across
+  hundreds of spawns.
+- **Bounded concurrency, no dependency.** A tiny native worker-pool (`pool`, with
+  `FARM_CONCURRENCY` lanes) runs N at a time with a **jittered stagger** so 200 accounts
+  don't burst as one — no `p-limit` package needed.
+- **Pure decision logic, unit-tested.** `classifyExit`, `shouldRetry`, `backoffMs`,
+  `isHardBan` are pure functions (exit code → status; retry only transient classes;
+  exponential backoff **with jitter**; detect "account disabled" text → quarantine). They
+  have no browser, so `test_farm.mjs` tests them with zero Chrome — the same "thin
+  messy I/O, fat testable core" split as `pickName` (section 5).
+- **Stream results, don't batch them.** Each account writes `farm-results/<id>.json`
+  **the moment it finishes** (not all at the end), so a crash or Ctrl-C mid-run keeps
+  every account that already completed. Dead accounts land in `quarantine.json` and are
+  skipped next run. *Lesson: persist incrementally when a long job can be interrupted.*
+
+The header comment in `farm.js` is honest about its **ceilings** (proxy-pool rotation,
+per-account fingerprints, multi-machine workers, account warming, CAPTCHA solving) — the
+things that need real infra beyond one box. Naming what you deliberately *didn't* build
+is good engineering documentation.
+
+---
+
 ## 12. Debugging a broken scraper
 
 Scrapers break when the site changes its DOM. This will happen to you. Here's the
@@ -651,8 +756,11 @@ Reading code teaches less than changing it. In rough order of difficulty:
 3. **Scrape more than the name.** Extend `extractRowsInPage` to also grab the last
    message preview text and timestamp, and have `pickName`'s sibling return them.
    You'll practice the `evaluate` boundary and pure-function split.
-4. **Output JSON.** Add `--json` so it prints `[{ "name": "..." }, ...]` instead of
-   plain lines. Teaches you why the stdout/stderr split matters.
+4. **Output JSON.** This one shipped — `--json <path>` writes the names + count +
+   timestamp to a file while stdout stays plain lines (`cli.js`). Read that code, then
+   extend it: add `--format ndjson` to stream one JSON object per line instead. Teaches
+   you why the stdout/stderr split matters and why the file write sits *after* the
+   stdout loop.
 5. **Write a test.** Add a case to `test_parse.mjs` for `pickName` — e.g. a group name
    that legitimately contains a comma should come through whole from `title` but be
    truncated from `ariaLabel`. Run `pnpm test`.
@@ -684,6 +792,13 @@ Reading code teaches less than changing it. In rough order of difficulty:
   that anti-bot systems detect.
 - **Checkpoint** — Facebook's post-login interstitial screens (2FA, "trust this
   device", "save your info").
+- **Passkey** — a WebAuthn credential (Face ID / fingerprint / device PIN) Facebook now
+  offers *first* in its 2FA chooser. It needs a real device gesture, so automation can't
+  satisfy it — the code routes around it to "Authentication app" (TOTP) instead.
+- **Viewport vs window size** — the *viewport* is the page's rendered area (set by
+  `defaultViewport` / `setViewport`); the *window* is the OS window (`--window-size`). A
+  viewport shorter than a modal can strand off-screen content with no scroll. Use a tall
+  window and `defaultViewport: null` in headful so the page scrolls like a normal browser.
 - **`userDataDir` / persistent profile** — a folder where Chrome stores a reusable
   session + device trust across runs; the key anti-reCAPTCHA tool here.
 

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "alice",
+    "username": "alice@example.com",
+    "pass": "alice-password",
+    "totp": "",
+    "proxy": "http://user:pass@residential-proxy-1.example.com:8000"
+  },
+  {
+    "id": "bob",
+    "username": "bob@example.com",
+    "pass": "bob-password",
+    "totp": "",
+    "proxy": "http://user:pass@residential-proxy-2.example.com:8000"
+  }
+]

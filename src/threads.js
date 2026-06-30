@@ -3,11 +3,13 @@
 // changes often. If this returns nothing, run with --headful, inspect a
 // conversation row in DevTools, and update the selectors below.
 import { setTimeout as sleep } from 'node:timers/promises';
+import { humanSleep, scrollStepRatio } from './humanize.js';
 
 const MESSENGER_URL = 'https://www.facebook.com/messages/t/';
 const ROW_SELECTOR = '[role="grid"] [role="row"]';
-const SCROLL_SETTLE_MS = 900;   // let lazy-loaded rows hydrate after each scroll
-const MAX_SCROLL_ITERS = 120;   // hard ceiling so a never-settling list can't spin forever
+const SETTLE_MIN_MS = 700;      // jittered settle window after each scroll (humanized) —
+const SETTLE_MAX_MS = 1500;     //   fixed cadence is an obvious bot tell
+const MAX_SCROLL_ITERS = 200;   // hard ceiling; raised because step-scroll takes more iters
 const STABLE_ROUNDS = 5;        // stop after N scrolls add no new names
 
 // Pure, unit-tested. Clean title wins (group names legitimately contain commas,
@@ -27,7 +29,10 @@ export async function collectThreadNames(page) {
   // here detaches the frame mid-scrape ("Attempted to use detached Frame"), so
   // only goto if we're somehow not on messenger.
   if (!page.url().includes('/messages')) {
-    await page.goto(MESSENGER_URL, { waitUntil: 'domcontentloaded' });
+    // FB client-redirects aggressively and cancels the pending navigation, surfacing
+    // as net::ERR_ABORTED even though the page still ends up on Messenger. Swallow it
+    // and let waitForSelector below be the real "are we there yet" check.
+    await page.goto(MESSENGER_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
   }
   await page.waitForSelector(ROW_SELECTOR, { timeout: 30000 });
   await sleep(2500); // let the first batch hydrate
@@ -57,11 +62,11 @@ export async function collectThreadNames(page) {
     }
     stable = seen.size === before ? stable + 1 : 0;
     try {
-      await page.evaluate(scrollChatListInPage);
+      await page.evaluate(scrollChatListInPage, scrollStepRatio());
     } catch {
       /* transient detach — next iteration's waitForSelector recovers */
     }
-    await sleep(SCROLL_SETTLE_MS);
+    await humanSleep(SETTLE_MIN_MS, SETTLE_MAX_MS); // jittered, not a fixed metronome
   }
   return [...seen];
 }
@@ -83,17 +88,20 @@ function extractRowsInPage() {
   return out;
 }
 
-// Scroll the chat list to its bottom to pull the next lazy-loaded batch.
-// The scroll container is a plain div ANCESTOR of the rows (not the grid
-// itself), identified by being the nearest ancestor that actually overflows.
-// Setting scrollTop here is immune to the modal overlay (unlike mouse wheel).
-function scrollChatListInPage() {
+// Scroll the chat list DOWN BY A STEP to pull the next lazy-loaded batch. Humans
+// don't teleport to the bottom — they scroll a screenful at a time, so we advance
+// by `stepRatio` of the visible height instead of jumping to scrollHeight. The
+// scroll container is a plain div ANCESTOR of the rows (not the grid itself),
+// identified by being the nearest ancestor that actually overflows. Setting
+// scrollTop here is immune to the modal overlay (unlike mouse wheel).
+function scrollChatListInPage(stepRatio) {
   const row = document.querySelector('[role="grid"] [role="row"]');
   if (!row) return;
   let el = row;
   while (el && el !== document.body) {
     if (el.scrollHeight > el.clientHeight + 20) {
-      el.scrollTop = el.scrollHeight;
+      const step = Math.max(120, el.clientHeight * (stepRatio || 0.8));
+      el.scrollTop = Math.min(el.scrollTop + step, el.scrollHeight);
       return;
     }
     el = el.parentElement;
